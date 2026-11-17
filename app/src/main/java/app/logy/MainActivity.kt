@@ -95,6 +95,7 @@ import app.logy.data.EventCategory
 import app.logy.data.EventEntry
 import app.logy.data.EventSummary
 import app.logy.data.TrackedEvent
+import app.logy.data.matchingNoteSuggestions
 import app.logy.ui.LogyTheme
 import app.logy.ui.formatDate
 import app.logy.ui.formatDateTime
@@ -268,7 +269,7 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
         save = { name, category, color -> viewModel.addEvent(name, category, color); addingEvent = false }
     )
     loggingEventId?.let { id ->
-        EntryDialog(initial = null, dismiss = { loggingEventId = null }) { time, note, duration, active ->
+        EntryDialog(initial = null, existingEntries = allEntries.filter { it.eventId == id }, dismiss = { loggingEventId = null }) { time, note, duration, active ->
             viewModel.addEntry(id, time, note, duration, active); loggingEventId = null
         }
     }
@@ -453,8 +454,8 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
         }
     }
 
-    if (adding) EntryDialog(null, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
-    editingEntry?.let { entry -> EntryDialog(entry, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
+    if (adding) EntryDialog(null, entries, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
+    editingEntry?.let { entry -> EntryDialog(entry, entries, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
     deletingEntry?.let { entry -> AlertDialog(
         onDismissRequest = { deletingEntry = null }, title = { Text("Delete this log?") },
         text = { Text("This log will be permanently removed. This action cannot be undone.") },
@@ -501,9 +502,11 @@ private fun EntryCard(entry: EventEntry, edit: () -> Unit, delete: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, String, Int?, Boolean) -> Unit) {
+private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>, dismiss: () -> Unit, save: (Long, String, Int?, Boolean) -> Unit) {
     var note by remember(initial) { mutableStateOf(initial?.note.orEmpty()) }
+    var suggestionsExpanded by remember { mutableStateOf(false) }
     var timestamp by remember(initial) { mutableLongStateOf(initial?.occurredAt ?: System.currentTimeMillis()) }
     var hours by remember(initial) { mutableStateOf(initial?.durationMinutes?.div(60)?.toString().orEmpty()) }
     var minutes by remember(initial) { mutableStateOf(initial?.durationMinutes?.rem(60)?.toString().orEmpty()) }
@@ -511,6 +514,7 @@ private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, 
     val context = LocalContext.current
     val hoursValue = hours.toIntOrNull() ?: 0
     val minutesValue = minutes.toIntOrNull() ?: 0
+    val suggestions = remember(existingEntries, note) { matchingNoteSuggestions(existingEntries, note) }
     val durationValid = hoursValue >= 0 && minutesValue in 0..59 && (hours.isBlank() || hours.toIntOrNull() != null) && (minutes.isBlank() || minutes.toIntOrNull() != null)
     fun chooseTime() {
         val calendar = Calendar.getInstance().apply { timeInMillis = timestamp }
@@ -523,7 +527,27 @@ private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, 
         title = { Text(if (initial == null) "Add log" else "Edit log") },
         text = { Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
             OutlinedButton(onClick = ::chooseTime, modifier = Modifier.fillMaxWidth()) { Text(formatDateTime(timestamp)) }
-            OutlinedTextField(note, { note = it }, label = { Text("Note (optional)") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+            ExposedDropdownMenuBox(
+                expanded = suggestionsExpanded && suggestions.isNotEmpty(),
+                onExpandedChange = { if (suggestions.isNotEmpty()) suggestionsExpanded = it }
+            ) {
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it; suggestionsExpanded = true },
+                    label = { Text("Note (optional)") },
+                    minLines = 3,
+                    trailingIcon = if (suggestions.isNotEmpty()) {{ ExposedDropdownMenuDefaults.TrailingIcon(suggestionsExpanded) }} else null,
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryEditable, true).fillMaxWidth()
+                )
+                ExposedDropdownMenu(expanded = suggestionsExpanded && suggestions.isNotEmpty(), onDismissRequest = { suggestionsExpanded = false }) {
+                    suggestions.forEach { suggestion ->
+                        DropdownMenuItem(
+                            text = { Text(suggestion, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                            onClick = { note = suggestion; suggestionsExpanded = false }
+                        )
+                    }
+                }
+            }
             Text("Duration (optional)", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(hours, { hours = it.filter(Char::isDigit) }, label = { Text("Hours") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
@@ -654,7 +678,7 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
                 SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1, v2, and v2.2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 2.2", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 2.3", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 
