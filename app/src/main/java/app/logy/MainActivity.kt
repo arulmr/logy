@@ -52,6 +52,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -267,8 +268,8 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
         save = { name, category, color -> viewModel.addEvent(name, category, color); addingEvent = false }
     )
     loggingEventId?.let { id ->
-        EntryDialog(initial = null, dismiss = { loggingEventId = null }) { time, note, duration ->
-            viewModel.addEntry(id, time, note, duration); loggingEventId = null
+        EntryDialog(initial = null, dismiss = { loggingEventId = null }) { time, note, duration, active ->
+            viewModel.addEntry(id, time, note, duration, active); loggingEventId = null
         }
     }
     if (choosingDates) DateRangeDialog(
@@ -452,8 +453,8 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
         }
     }
 
-    if (adding) EntryDialog(null, { adding = false }) { time, note, duration -> viewModel.addEntry(id, time, note, duration); adding = false }
-    editingEntry?.let { entry -> EntryDialog(entry, { editingEntry = null }) { time, note, duration -> viewModel.updateEntry(entry, time, note, duration); editingEntry = null } }
+    if (adding) EntryDialog(null, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
+    editingEntry?.let { entry -> EntryDialog(entry, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
     deletingEntry?.let { entry -> AlertDialog(
         onDismissRequest = { deletingEntry = null }, title = { Text("Delete this log?") },
         text = { Text("This log will be permanently removed. This action cannot be undone.") },
@@ -487,7 +488,12 @@ private fun EntryCard(entry: EventEntry, edit: () -> Unit, delete: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text(formatDateTime(entry.occurredAt), fontWeight = FontWeight.SemiBold)
                 if (entry.note.isNotBlank()) Text(entry.note, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 3.dp))
-                entry.durationMinutes?.let { Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Outlined.Timer, null, Modifier.size(15.dp)); Text(formatDuration(it), Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium) } }
+                if (entry.durationMinutes != null || !entry.active) {
+                    Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        entry.durationMinutes?.let { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Outlined.Timer, null, Modifier.size(15.dp)); Text(formatDuration(it), Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium) } }
+                        if (!entry.active) LabelPill("Inactive")
+                    }
+                }
             }
             IconButton(onClick = edit) { Icon(Icons.Outlined.Edit, "Edit log") }
             IconButton(onClick = delete) { Icon(Icons.Outlined.Delete, "Delete log", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -496,11 +502,12 @@ private fun EntryCard(entry: EventEntry, edit: () -> Unit, delete: () -> Unit) {
 }
 
 @Composable
-private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, String, Int?) -> Unit) {
+private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, String, Int?, Boolean) -> Unit) {
     var note by remember(initial) { mutableStateOf(initial?.note.orEmpty()) }
     var timestamp by remember(initial) { mutableLongStateOf(initial?.occurredAt ?: System.currentTimeMillis()) }
     var hours by remember(initial) { mutableStateOf(initial?.durationMinutes?.div(60)?.toString().orEmpty()) }
     var minutes by remember(initial) { mutableStateOf(initial?.durationMinutes?.rem(60)?.toString().orEmpty()) }
+    var active by remember(initial) { mutableStateOf(initial?.active ?: true) }
     val context = LocalContext.current
     val hoursValue = hours.toIntOrNull() ?: 0
     val minutesValue = minutes.toIntOrNull() ?: 0
@@ -522,9 +529,16 @@ private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, 
                 OutlinedTextField(hours, { hours = it.filter(Char::isDigit) }, label = { Text("Hours") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
                 OutlinedTextField(minutes, { minutes = it.filter(Char::isDigit) }, label = { Text("Minutes") }, singleLine = true, isError = minutesValue !in 0..59, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
             }
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { active = !active }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Checkbox(checked = active, onCheckedChange = { active = it })
+                Column { Text("Active", fontWeight = FontWeight.SemiBold); Text("New logs are active by default", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
         } },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
-        confirmButton = { Button(onClick = { val total = hoursValue * 60 + minutesValue; save(timestamp, note, total.takeIf { it > 0 }) }, enabled = durationValid) { Text("Save") } }
+        confirmButton = { Button(onClick = { val total = hoursValue * 60 + minutesValue; save(timestamp, note, total.takeIf { it > 0 }, active) }, enabled = durationValid) { Text("Save") } }
     )
 }
 
@@ -637,10 +651,10 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
                 Spacer(Modifier.height(16.dp))
                 SettingsAction(Icons.Outlined.Download, "Export CSV backup", "Save categories, events, logs, and durations", export)
                 Spacer(Modifier.height(10.dp))
-                SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1 and v2 backups", import)
+                SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1, v2, and v2.2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 2.1", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 2.2", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 

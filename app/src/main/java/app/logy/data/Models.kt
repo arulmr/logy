@@ -44,7 +44,8 @@ data class EventEntry(
     @ColumnInfo(name = "event_id") val eventId: Long,
     @ColumnInfo(name = "occurred_at") val occurredAt: Long = System.currentTimeMillis(),
     val note: String = "",
-    @ColumnInfo(name = "duration_minutes") val durationMinutes: Int? = null
+    @ColumnInfo(name = "duration_minutes") val durationMinutes: Int? = null,
+    val active: Boolean = true
 )
 
 data class EventSummary(
@@ -114,5 +115,5 @@ interface LogyDao {
     }
 }
 
-@Database(entities = [TrackedEvent::class, EventEntry::class, EventCategory::class], version = 2, exportSchema = false)
+@Database(entities = [TrackedEvent::class, EventEntry::class, EventCategory::class], version = 3, exportSchema = false)
 abstract class LogyDatabase : RoomDatabase() { abstract fun dao(): LogyDao }

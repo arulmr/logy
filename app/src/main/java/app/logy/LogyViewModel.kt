@@ -34,8 +34,8 @@ class LogyViewModel(application: Application) : AndroidViewModel(application) {
     fun setTheme(mode: ThemeMode) { _theme.value = mode; prefs.edit().putString("theme", mode.name).apply() }
     fun addEvent(name: String, category: String, color: Long) = viewModelScope.launch { dao.insertEvent(TrackedEvent(name = name.trim(), category = category, color = color)) }
     fun updateEvent(event: TrackedEvent, name: String, category: String, color: Long) = viewModelScope.launch { dao.updateEvent(event.copy(name = name.trim(), category = category, color = color)) }
-    fun addEntry(eventId: Long, occurredAt: Long, note: String, durationMinutes: Int?) = viewModelScope.launch { dao.insertEntry(EventEntry(eventId = eventId, occurredAt = occurredAt, note = note.trim(), durationMinutes = durationMinutes)) }
-    fun updateEntry(entry: EventEntry, occurredAt: Long, note: String, durationMinutes: Int?) = viewModelScope.launch { dao.updateEntry(entry.copy(occurredAt = occurredAt, note = note.trim(), durationMinutes = durationMinutes)) }
+    fun addEntry(eventId: Long, occurredAt: Long, note: String, durationMinutes: Int?, active: Boolean) = viewModelScope.launch { dao.insertEntry(EventEntry(eventId = eventId, occurredAt = occurredAt, note = note.trim(), durationMinutes = durationMinutes, active = active)) }
+    fun updateEntry(entry: EventEntry, occurredAt: Long, note: String, durationMinutes: Int?, active: Boolean) = viewModelScope.launch { dao.updateEntry(entry.copy(occurredAt = occurredAt, note = note.trim(), durationMinutes = durationMinutes, active = active)) }
     fun addCategory(name: String, color: Long) = viewModelScope.launch { dao.insertCategory(EventCategory(name.trim(), color)) }
     fun updateCategory(oldName: String, name: String, color: Long) = viewModelScope.launch { dao.renameCategory(oldName, EventCategory(name.trim(), color)) }
     fun deleteCategory(category: EventCategory) = viewModelScope.launch { if (category.name != "General") dao.removeCategory(category.name) }
