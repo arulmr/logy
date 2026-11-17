@@ -54,6 +54,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
@@ -73,6 +74,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -94,7 +96,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.logy.data.EventCategory
 import app.logy.data.EventEntry
 import app.logy.data.EventSummary
+import app.logy.data.EventSort
 import app.logy.data.TrackedEvent
+import app.logy.data.applyEventListOptions
 import app.logy.data.matchingNoteSuggestions
 import app.logy.ui.LogyTheme
 import app.logy.ui.formatDate
@@ -185,11 +189,20 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
     val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
+    var eventSort by rememberSaveable { mutableStateOf(EventSort.OLDEST_LOGGED) }
+    var categoryFilter by rememberSaveable { mutableStateOf<String?>(null) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
+    var categoryMenuExpanded by remember { mutableStateOf(false) }
     var fromDate by rememberSaveable { mutableStateOf<Long?>(null) }
     var toDate by rememberSaveable { mutableStateOf<Long?>(null) }
     var choosingDates by remember { mutableStateOf(false) }
     var addingEvent by remember { mutableStateOf(false) }
     var loggingEventId by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(categories, categoryFilter) {
+        if (categories.isNotEmpty() && categoryFilter != null && categories.none { it.name == categoryFilter }) {
+            categoryFilter = null
+        }
+    }
     val hasDateRange = fromDate != null && toDate != null
     val rangedLogs = remember(allEntries, fromDate, toDate) {
         if (!hasDateRange) allEntries else allEntries.filter { it.occurredAt in fromDate!!..toDate!! }
@@ -198,13 +211,14 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
     val matchingLogs = remember(rangedLogs, query) {
         if (query.isBlank()) emptyMap() else rangedLogs.filter { it.note.contains(query.trim(), true) }.groupBy { it.eventId }
     }
-    val filtered = remember(events, query, matchingLogs, hasDateRange, periodStats) {
-        events.filter { event ->
+    val filtered = remember(events, query, matchingLogs, hasDateRange, periodStats, categoryFilter, eventSort) {
+        val matchingEvents = events.filter { event ->
             val matchesText = query.isBlank() || event.name.contains(query.trim(), true) ||
                 event.category.contains(query.trim(), true) || matchingLogs.containsKey(event.id)
             val matchesDate = !hasDateRange || periodStats.containsKey(event.id)
             matchesText && matchesDate
         }
+        applyEventListOptions(matchingEvents, categoryFilter, eventSort)
     }
 
     Scaffold(
@@ -248,8 +262,47 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
                         }
                     }
                 }
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(Modifier.weight(1f)) {
+                        OutlinedButton(onClick = { sortMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Outlined.Schedule, null, Modifier.size(18.dp))
+                            Text(eventSort.label, Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
+                        }
+                        DropdownMenu(expanded = sortMenuExpanded, onDismissRequest = { sortMenuExpanded = false }) {
+                            EventSort.entries.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option.label) },
+                                    onClick = { eventSort = option; sortMenuExpanded = false }
+                                )
+                            }
+                        }
+                    }
+                    Box(Modifier.weight(1f)) {
+                        OutlinedButton(onClick = { categoryMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Outlined.Category, null, Modifier.size(18.dp))
+                            Text(categoryFilter ?: "All categories", Modifier.weight(1f).padding(horizontal = 8.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Icon(Icons.Outlined.ExpandMore, null, Modifier.size(18.dp))
+                        }
+                        DropdownMenu(expanded = categoryMenuExpanded, onDismissRequest = { categoryMenuExpanded = false }) {
+                            DropdownMenuItem(
+                                text = { Text("All categories") },
+                                onClick = { categoryFilter = null; categoryMenuExpanded = false }
+                            )
+                            categories.forEach { category ->
+                                DropdownMenuItem(
+                                    text = { Text(category.name) },
+                                    onClick = { categoryFilter = category.name; categoryMenuExpanded = false }
+                                )
+                            }
+                        }
+                    }
+                }
             }
-            if (filtered.isEmpty()) item { EmptyState(query.isNotBlank() || hasDateRange) { addingEvent = true } }
+            if (filtered.isEmpty()) item { EmptyState(query.isNotBlank() || hasDateRange || categoryFilter != null) { addingEvent = true } }
             items(filtered, key = { it.id }) { event ->
                 val logs = periodStats[event.id].orEmpty()
                 EventRow(
@@ -678,7 +731,7 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
                 SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1, v2, and v2.2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 2.3", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 2.4", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 
