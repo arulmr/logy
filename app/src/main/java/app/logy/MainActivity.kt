@@ -5,6 +5,7 @@ import android.app.TimePickerDialog
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -35,23 +36,29 @@ import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -74,22 +81,24 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.lifecycleScope
+import app.logy.data.EventCategory
 import app.logy.data.EventEntry
 import app.logy.data.EventSummary
 import app.logy.data.TrackedEvent
 import app.logy.ui.LogyTheme
 import app.logy.ui.formatDateTime
+import app.logy.ui.formatDuration
 import app.logy.ui.formatElapsed
 import kotlinx.coroutines.launch
 import java.util.Calendar
 
 class MainActivity : ComponentActivity() {
     private val viewModel: LogyViewModel by viewModels()
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -100,7 +109,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Page { HOME, SETTINGS, DETAIL }
+private enum class Page { HOME, CATEGORIES, SETTINGS, DETAIL }
 
 @Composable
 private fun LogyApp(viewModel: LogyViewModel) {
@@ -110,44 +119,34 @@ private fun LogyApp(viewModel: LogyViewModel) {
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    BackHandler(enabled = page != Page.HOME) { page = Page.HOME }
 
-    val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("text/csv")
-    ) { uri ->
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
         if (uri != null) scope.launch {
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
-                    it.write(viewModel.exportCsv())
-                } ?: error("Could not open the selected file.")
-            }.onSuccess { snackbar.showSnackbar("Backup exported") }
+            runCatching { context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(viewModel.exportCsv()) } ?: error("Could not open the selected file.") }
+                .onSuccess { snackbar.showSnackbar("Backup exported") }
                 .onFailure { snackbar.showSnackbar(it.message ?: "Export failed") }
         }
     }
-    val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri -> pendingImport = uri }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { pendingImport = it }
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { outerPadding ->
         Box(Modifier.padding(outerPadding)) {
             AnimatedContent(targetState = page, label = "page") { target ->
                 when (target) {
                     Page.HOME -> HomeScreen(
-                        viewModel = viewModel,
+                        viewModel, openCategories = { page = Page.CATEGORIES },
                         openSettings = { page = Page.SETTINGS },
                         openEvent = { selectedId = it; page = Page.DETAIL }
                     )
+                    Page.CATEGORIES -> CategoriesScreen(viewModel) { page = Page.HOME }
                     Page.SETTINGS -> SettingsScreen(
                         theme = viewModel.theme.collectAsStateWithLifecycle().value,
-                        onTheme = viewModel::setTheme,
-                        goBack = { page = Page.HOME },
-                        export = { exportLauncher.launch("logy-backup.csv") },
+                        onTheme = viewModel::setTheme, goBack = { page = Page.HOME },
+                        export = { exportLauncher.launch("logy-v2-backup.csv") },
                         import = { importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain")) }
                     )
-                    Page.DETAIL -> DetailScreen(
-                        id = selectedId,
-                        viewModel = viewModel,
-                        goBack = { page = Page.HOME }
-                    )
+                    Page.DETAIL -> DetailScreen(selectedId, viewModel) { page = Page.HOME }
                 }
             }
         }
@@ -155,155 +154,169 @@ private fun LogyApp(viewModel: LogyViewModel) {
 
     pendingImport?.let { uri ->
         AlertDialog(
-            onDismissRequest = { pendingImport = null },
-            icon = { Icon(Icons.Outlined.Upload, null) },
+            onDismissRequest = { pendingImport = null }, icon = { Icon(Icons.Outlined.Upload, null) },
             title = { Text("Restore this backup?") },
-            text = { Text("This replaces every event and entry currently stored on this device. This action cannot be undone.") },
+            text = { Text("This replaces every category, event, and log stored on this device. This action cannot be undone.") },
             dismissButton = { TextButton(onClick = { pendingImport = null }) { Text("Cancel") } },
-            confirmButton = {
-                Button(onClick = {
-                    pendingImport = null
-                    scope.launch {
-                        runCatching {
-                            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use {
-                                viewModel.importCsv(it)
-                            } ?: error("Could not open the selected file.")
-                        }.onSuccess { snackbar.showSnackbar("Backup restored") }
-                            .onFailure { snackbar.showSnackbar(it.message ?: "Import failed") }
-                    }
-                }) { Text("Replace data") }
-            }
+            confirmButton = { Button(onClick = {
+                pendingImport = null
+                scope.launch {
+                    runCatching { context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { viewModel.importCsv(it) } ?: error("Could not open the selected file.") }
+                        .onSuccess { snackbar.showSnackbar("Backup restored") }
+                        .onFailure { snackbar.showSnackbar(it.message ?: "Import failed") }
+                }
+            }) { Text("Replace data") } }
         )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(
-    viewModel: LogyViewModel,
-    openSettings: () -> Unit,
-    openEvent: (Long) -> Unit
-) {
+private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, openSettings: () -> Unit, openEvent: (Long) -> Unit) {
     val events by viewModel.events.collectAsStateWithLifecycle()
+    val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
+    val categories by viewModel.categories.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
-    var adding by remember { mutableStateOf(false) }
-    val filtered = remember(events, query) {
-        events.filter { it.name.contains(query, true) || it.category.contains(query, true) }
+    var addingEvent by remember { mutableStateOf(false) }
+    var loggingEventId by remember { mutableStateOf<Long?>(null) }
+    val matchingLogs = remember(allEntries, query) {
+        if (query.isBlank()) emptyMap() else allEntries.filter { it.note.contains(query.trim(), true) }.groupBy { it.eventId }
+    }
+    val filtered = remember(events, query, matchingLogs) {
+        if (query.isBlank()) events else events.filter {
+            it.name.contains(query.trim(), true) || it.category.contains(query.trim(), true) || matchingLogs.containsKey(it.id)
+        }
     }
 
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text("Logy", fontWeight = FontWeight.Bold) },
-                actions = { IconButton(onClick = openSettings) { Icon(Icons.Outlined.Settings, "Settings") } }
+                actions = {
+                    IconButton(onClick = openCategories) { Icon(Icons.Outlined.Category, "Categories") }
+                    IconButton(onClick = openSettings) { Icon(Icons.Outlined.Settings, "Settings") }
+                }
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { adding = true },
-                icon = { Icon(Icons.Outlined.Add, null) },
-                text = { Text("New event") }
-            )
+            ExtendedFloatingActionButton(onClick = { addingEvent = true }, icon = { Icon(Icons.Outlined.Add, null) }, text = { Text("Event") })
         }
     ) { padding ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(bottom = 92.dp)
         ) {
             item {
-                Text("Your timeline", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("Remember when, without remembering to remember.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(20.dp))
                 OutlinedTextField(
-                    value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth(),
+                    value = query, onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     leadingIcon = { Icon(Icons.Outlined.Search, null) },
                     trailingIcon = if (query.isNotEmpty()) {{ IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, "Clear") } }} else null,
-                    placeholder = { Text("Search events or categories") }, singleLine = true,
-                    shape = RoundedCornerShape(20.dp)
+                    placeholder = { Text("Search events and log notes") }, singleLine = true,
+                    shape = RoundedCornerShape(28.dp)
                 )
-                Spacer(Modifier.height(8.dp))
             }
-            if (filtered.isEmpty()) {
-                item { EmptyState(hasQuery = query.isNotEmpty(), onAdd = { adding = true }) }
-            } else {
-                items(filtered, key = { it.id }) { item -> EventCard(item, openEvent) }
+            if (filtered.isEmpty()) item { EmptyState(query.isNotBlank()) { addingEvent = true } }
+            items(filtered, key = { it.id }) { event ->
+                EventRow(
+                    event = event, matches = matchingLogs[event.id].orEmpty(), searching = query.isNotBlank(),
+                    open = { openEvent(event.id) }, addLog = { loggingEventId = event.id }
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
             }
         }
     }
 
-    if (adding) AddEventDialog(
-        dismiss = { adding = false },
-        add = { name, category, color -> viewModel.addEvent(name, category, color); adding = false }
+    if (addingEvent) EventDialog(
+        categories = categories, initial = null, dismiss = { addingEvent = false },
+        save = { name, category, color -> viewModel.addEvent(name, category, color); addingEvent = false }
     )
+    loggingEventId?.let { id ->
+        EntryDialog(initial = null, dismiss = { loggingEventId = null }) { time, note, duration ->
+            viewModel.addEntry(id, time, note, duration); loggingEventId = null
+        }
+    }
 }
 
 @Composable
-private fun EventCard(event: EventSummary, openEvent: (Long) -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable { openEvent(event.id) },
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
-    ) {
-        Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(52.dp).clip(CircleShape).background(Color(event.color)),
-                contentAlignment = Alignment.Center
-            ) { Icon(Icons.Outlined.History, null, tint = Color.White) }
-            Column(Modifier.weight(1f).padding(horizontal = 16.dp)) {
-                Text(event.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(event.category, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text(formatElapsed(event.lastEntry), color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                Text("${event.entryCount} ${if (event.entryCount == 1) "entry" else "entries"}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun EventRow(event: EventSummary, matches: List<EventEntry>, searching: Boolean, open: () -> Unit, addLog: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clickable(onClick = open).padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(Color(event.color)))
+            Text(event.name, Modifier.weight(1f).padding(start = 10.dp), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (event.lastEntry != null) Text(formatDateTime(event.lastEntry), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            IconButton(onClick = addLog, modifier = Modifier.size(40.dp)) { Icon(Icons.Outlined.Add, "Add log", tint = MaterialTheme.colorScheme.primary) }
+        }
+        if (!event.lastNote.isNullOrBlank()) Text(event.lastNote, Modifier.padding(start = 20.dp, end = 8.dp, top = 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (searching && matches.isNotEmpty()) {
+            Column(Modifier.padding(start = 20.dp, top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                matches.take(3).forEach { log ->
+                    Text("• ${log.note}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(formatDateTime(log.occurredAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (matches.size > 3) Text("+${matches.size - 3} more matching logs", style = MaterialTheme.typography.labelSmall)
             }
         }
+        Row(Modifier.fillMaxWidth().padding(start = 20.dp, top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            LabelPill(event.category)
+            Spacer(Modifier.weight(1f))
+            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Text(formatElapsed(event.lastEntry), Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LabelPill(text: String) {
+    Surface(shape = RoundedCornerShape(5.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Text(text, Modifier.padding(horizontal = 8.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 private fun EmptyState(hasQuery: Boolean, onAdd: () -> Unit) {
-    Column(
-        Modifier.fillMaxWidth().padding(vertical = 56.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
-            Icon(if (hasQuery) Icons.Outlined.Search else Icons.Outlined.Schedule, null, Modifier.padding(22.dp).size(32.dp))
-        }
-        Spacer(Modifier.height(18.dp))
-        Text(if (hasQuery) "Nothing found" else "Start your first timeline", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-        Text(if (hasQuery) "Try a different search" else "Track anything that matters to you", color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (!hasQuery) { Spacer(Modifier.height(18.dp)); OutlinedButton(onClick = onAdd) { Text("Create event") } }
+    Column(Modifier.fillMaxWidth().padding(vertical = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(if (hasQuery) Icons.Outlined.Search else Icons.Outlined.Schedule, null, Modifier.size(42.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.height(12.dp))
+        Text(if (hasQuery) "Nothing found" else "Create your first event", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(if (hasQuery) "Try another event, category, or note" else "Keep the moments that matter within reach", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!hasQuery) { Spacer(Modifier.height(16.dp)); OutlinedButton(onClick = onAdd) { Text("Create event") } }
     }
 }
 
 private val swatches = listOf(0xFF8B7CF6, 0xFFEC6F8C, 0xFF00A98F, 0xFFFF9F43, 0xFF3D8BFF, 0xFF9B6B43)
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddEventDialog(dismiss: () -> Unit, add: (String, String, Long) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var category by remember { mutableStateOf("") }
-    var color by remember { mutableLongStateOf(swatches.first()) }
+private fun EventDialog(categories: List<EventCategory>, initial: TrackedEvent?, dismiss: () -> Unit, save: (String, String, Long) -> Unit) {
+    val choices = categories.ifEmpty { listOf(EventCategory("General")) }
+    var name by remember(initial) { mutableStateOf(initial?.name.orEmpty()) }
+    var category by remember(initial, choices) { mutableStateOf(initial?.category?.takeIf { value -> choices.any { it.name == value } } ?: choices.first().name) }
+    var color by remember(initial) { mutableLongStateOf(initial?.color ?: swatches.first()) }
+    var expanded by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = dismiss,
-        title = { Text("What do you want to track?") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                OutlinedTextField(name, { name = it }, label = { Text("Event name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(category, { category = it }, label = { Text("Category (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Outlined.Category, null) })
-                Text("Accent color", style = MaterialTheme.typography.labelLarge)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    swatches.forEach { item ->
-                        Box(
-                            Modifier.size(if (color == item) 42.dp else 36.dp).clip(CircleShape).background(Color(item)).clickable { color = item }
-                        )
-                    }
+        title = { Text(if (initial == null) "Create event" else "Edit event") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            OutlinedTextField(name, { name = it }, label = { Text("Event name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
+                OutlinedTextField(
+                    value = category, onValueChange = {}, readOnly = true, label = { Text("Category") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, true).fillMaxWidth()
+                )
+                ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    choices.forEach { item -> DropdownMenuItem(text = { Text(item.name) }, onClick = { category = item.name; expanded = false }) }
                 }
             }
-        },
+            Text("Accent color", style = MaterialTheme.typography.labelLarge)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                swatches.forEach { item -> Box(Modifier.size(if (color == item) 42.dp else 34.dp).clip(CircleShape).background(Color(item)).clickable { color = item }) }
+            }
+        } },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
-        confirmButton = { Button(onClick = { add(name, category, color) }, enabled = name.isNotBlank()) { Text("Create") } }
+        confirmButton = { Button(onClick = { save(name, category, color) }, enabled = name.isNotBlank()) { Text(if (initial == null) "Create" else "Save") } }
     )
 }
 
@@ -312,172 +325,205 @@ private fun AddEventDialog(dismiss: () -> Unit, add: (String, String, Long) -> U
 private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit) {
     val event by remember(id) { viewModel.event(id) }.collectAsStateWithLifecycle(initialValue = null)
     val entries by remember(id) { viewModel.entries(id) }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val categories by viewModel.categories.collectAsStateWithLifecycle()
+    var query by rememberSaveable(id) { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
-    var deleteEvent by remember { mutableStateOf(false) }
+    var editingEvent by remember { mutableStateOf(false) }
+    var editingEntry by remember { mutableStateOf<EventEntry?>(null) }
+    var deletingEvent by remember { mutableStateOf(false) }
+    val filtered = remember(entries, query) { if (query.isBlank()) entries else entries.filter { it.note.contains(query.trim(), true) } }
 
     Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(event?.name ?: "Event", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } },
-                actions = { IconButton(onClick = { deleteEvent = true }) { Icon(Icons.Outlined.Delete, "Delete event") } }
-            )
-        },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(onClick = { adding = true }, icon = { Icon(Icons.Outlined.Add, null) }, text = { Text("Add entry") })
-        }
+        topBar = { CenterAlignedTopAppBar(
+            title = { Text(event?.name ?: "Event", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } },
+            actions = {
+                IconButton(onClick = { editingEvent = true }) { Icon(Icons.Outlined.Edit, "Edit event") }
+                IconButton(onClick = { deletingEvent = true }) { Icon(Icons.Outlined.Delete, "Delete event") }
+            }
+        ) },
+        floatingActionButton = { ExtendedFloatingActionButton(onClick = { adding = true }, icon = { Icon(Icons.Outlined.Add, null) }, text = { Text("Log") }) }
     ) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 104.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            event?.let { current ->
-                item {
-                    Card(shape = RoundedCornerShape(28.dp), colors = CardDefaults.cardColors(containerColor = Color(current.color))) {
-                        Column(Modifier.fillMaxWidth().padding(24.dp)) {
-                            Text("LAST LOGGED", color = Color.White.copy(alpha = .78f), style = MaterialTheme.typography.labelMedium)
-                            Text(formatElapsed(entries.firstOrNull()?.occurredAt), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                            Spacer(Modifier.height(12.dp))
-                            Text("${entries.size} total entries  •  ${current.category}", color = Color.White.copy(alpha = .88f))
-                        }
+            event?.let { current -> item {
+                Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = Color(current.color))) {
+                    Column(Modifier.fillMaxWidth().padding(22.dp)) {
+                        Text("LAST LOGGED", color = Color.White.copy(alpha = .76f), style = MaterialTheme.typography.labelMedium)
+                        Text(formatElapsed(entries.firstOrNull()?.occurredAt), color = Color.White, style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+                        Text("${entries.size} logs  •  ${current.category}", color = Color.White.copy(alpha = .9f))
                     }
-                    Spacer(Modifier.height(12.dp))
-                    Text("History", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 }
-            }
-            if (entries.isEmpty()) item { EmptyHistory { adding = true } }
-            items(entries, key = { it.id }) { entry -> EntryCard(entry) { viewModel.deleteEntry(entry) } }
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it }, modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                    trailingIcon = if (query.isNotEmpty()) {{ IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, "Clear") } }} else null,
+                    placeholder = { Text("Search notes in this event") }, singleLine = true, shape = RoundedCornerShape(20.dp)
+                )
+            } }
+            if (filtered.isEmpty()) item { EmptyHistory(hasQuery = query.isNotBlank()) { adding = true } }
+            items(filtered, key = { it.id }) { entry -> EntryCard(entry, edit = { editingEntry = entry }, delete = { viewModel.deleteEntry(entry) }) }
         }
     }
 
-    if (adding) AddEntryDialog(dismiss = { adding = false }) { time, note ->
-        viewModel.addEntry(id, time, note); adding = false
-    }
-    if (deleteEvent) AlertDialog(
-        onDismissRequest = { deleteEvent = false },
-        title = { Text("Delete this event?") },
-        text = { Text("The event and its complete history will be permanently removed.") },
-        dismissButton = { TextButton(onClick = { deleteEvent = false }) { Text("Cancel") } },
-        confirmButton = { Button(onClick = { event?.let(viewModel::deleteEvent); deleteEvent = false; goBack() }) { Text("Delete") } }
+    if (adding) EntryDialog(null, { adding = false }) { time, note, duration -> viewModel.addEntry(id, time, note, duration); adding = false }
+    editingEntry?.let { entry -> EntryDialog(entry, { editingEntry = null }) { time, note, duration -> viewModel.updateEntry(entry, time, note, duration); editingEntry = null } }
+    if (editingEvent) event?.let { current -> EventDialog(categories, current, { editingEvent = false }) { name, category, color -> viewModel.updateEvent(current, name, category, color); editingEvent = false } }
+    if (deletingEvent) AlertDialog(
+        onDismissRequest = { deletingEvent = false }, title = { Text("Delete this event?") },
+        text = { Text("The event and its complete log history will be permanently removed.") },
+        dismissButton = { TextButton(onClick = { deletingEvent = false }) { Text("Cancel") } },
+        confirmButton = { Button(onClick = { event?.let(viewModel::deleteEvent); deletingEvent = false; goBack() }) { Text("Delete") } }
     )
 }
 
 @Composable
-private fun EmptyHistory(add: () -> Unit) {
-    Card(shape = RoundedCornerShape(24.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("No entries yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Add the first moment to this timeline", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp)); OutlinedButton(onClick = add) { Text("Add now") }
-        }
-    }
-}
-
-@Composable
-private fun EntryCard(entry: EventEntry, delete: () -> Unit) {
+private fun EmptyHistory(hasQuery: Boolean, add: () -> Unit) {
     Card(shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondary))
-            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
-                Text(formatDateTime(entry.occurredAt), fontWeight = FontWeight.SemiBold)
-                if (entry.note.isNotBlank()) Text(entry.note, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            IconButton(onClick = delete) { Icon(Icons.Outlined.Delete, "Delete entry", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column(Modifier.fillMaxWidth().padding(26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(if (hasQuery) "No matching notes" else "No logs yet", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text(if (hasQuery) "Try another search" else "Add the first moment to this timeline", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!hasQuery) { Spacer(Modifier.height(10.dp)); OutlinedButton(onClick = add) { Text("Add now") } }
         }
     }
 }
 
 @Composable
-private fun AddEntryDialog(dismiss: () -> Unit, add: (Long, String) -> Unit) {
-    var note by remember { mutableStateOf("") }
-    var timestamp by remember { mutableLongStateOf(System.currentTimeMillis()) }
+private fun EntryCard(entry: EventEntry, edit: () -> Unit, delete: () -> Unit) {
+    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(formatDateTime(entry.occurredAt), fontWeight = FontWeight.SemiBold)
+                if (entry.note.isNotBlank()) Text(entry.note, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 3.dp))
+                entry.durationMinutes?.let { Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Outlined.Timer, null, Modifier.size(15.dp)); Text(formatDuration(it), Modifier.padding(start = 5.dp), style = MaterialTheme.typography.labelMedium) } }
+            }
+            IconButton(onClick = edit) { Icon(Icons.Outlined.Edit, "Edit log") }
+            IconButton(onClick = delete) { Icon(Icons.Outlined.Delete, "Delete log", tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
+    }
+}
+
+@Composable
+private fun EntryDialog(initial: EventEntry?, dismiss: () -> Unit, save: (Long, String, Int?) -> Unit) {
+    var note by remember(initial) { mutableStateOf(initial?.note.orEmpty()) }
+    var timestamp by remember(initial) { mutableLongStateOf(initial?.occurredAt ?: System.currentTimeMillis()) }
+    var hours by remember(initial) { mutableStateOf(initial?.durationMinutes?.div(60)?.toString().orEmpty()) }
+    var minutes by remember(initial) { mutableStateOf(initial?.durationMinutes?.rem(60)?.toString().orEmpty()) }
     val context = LocalContext.current
+    val hoursValue = hours.toIntOrNull() ?: 0
+    val minutesValue = minutes.toIntOrNull() ?: 0
+    val durationValid = hoursValue >= 0 && minutesValue in 0..59 && (hours.isBlank() || hours.toIntOrNull() != null) && (minutes.isBlank() || minutes.toIntOrNull() != null)
     fun chooseTime() {
         val calendar = Calendar.getInstance().apply { timeInMillis = timestamp }
         DatePickerDialog(context, { _, year, month, day ->
-            TimePickerDialog(context, { _, hour, minute ->
-                calendar.set(year, month, day, hour, minute, 0)
-                timestamp = calendar.timeInMillis
-            }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false).show()
+            TimePickerDialog(context, { _, hour, minute -> calendar.set(year, month, day, hour, minute, 0); timestamp = calendar.timeInMillis }, calendar.get(Calendar.HOUR_OF_DAY), calendar.get(Calendar.MINUTE), false).show()
         }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
     }
     AlertDialog(
-        onDismissRequest = dismiss,
-        icon = { Icon(Icons.Outlined.Schedule, null) },
-        title = { Text("Add an entry") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                OutlinedButton(onClick = ::chooseTime, modifier = Modifier.fillMaxWidth()) { Text(formatDateTime(timestamp)) }
-                OutlinedTextField(note, { note = it }, label = { Text("Note (optional)") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+        onDismissRequest = dismiss, icon = { Icon(Icons.Outlined.Schedule, null) },
+        title = { Text(if (initial == null) "Add log" else "Edit log") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(13.dp)) {
+            OutlinedButton(onClick = ::chooseTime, modifier = Modifier.fillMaxWidth()) { Text(formatDateTime(timestamp)) }
+            OutlinedTextField(note, { note = it }, label = { Text("Note (optional)") }, minLines = 3, modifier = Modifier.fillMaxWidth())
+            Text("Duration (optional)", style = MaterialTheme.typography.labelLarge)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(hours, { hours = it.filter(Char::isDigit) }, label = { Text("Hours") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                OutlinedTextField(minutes, { minutes = it.filter(Char::isDigit) }, label = { Text("Minutes") }, singleLine = true, isError = minutesValue !in 0..59, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
             }
-        },
+        } },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
-        confirmButton = { Button(onClick = { add(timestamp, note) }) { Text("Save entry") } }
+        confirmButton = { Button(onClick = { val total = hoursValue * 60 + minutesValue; save(timestamp, note, total.takeIf { it > 0 }) }, enabled = durationValid) { Text("Save") } }
     )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsScreen(
-    theme: ThemeMode,
-    onTheme: (ThemeMode) -> Unit,
-    goBack: () -> Unit,
-    export: () -> Unit,
-    import: () -> Unit
-) {
-    Scaffold(topBar = {
-        CenterAlignedTopAppBar(
-            title = { Text("Settings") },
-            navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } }
-        )
-    }) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
-        ) {
+private fun CategoriesScreen(viewModel: LogyViewModel, goBack: () -> Unit) {
+    val categories by viewModel.categories.collectAsStateWithLifecycle()
+    var adding by remember { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<EventCategory?>(null) }
+    var deleting by remember { mutableStateOf<EventCategory?>(null) }
+    Scaffold(
+        topBar = { CenterAlignedTopAppBar(title = { Text("Categories") }, navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } }) },
+        floatingActionButton = { ExtendedFloatingActionButton(onClick = { adding = true }, icon = { Icon(Icons.Outlined.Add, null) }, text = { Text("Category") }) }
+    ) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp, 8.dp, 16.dp, 96.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { Text("Organize events with reusable categories.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            items(categories, key = { it.name }) { category ->
+                Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+                    Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(38.dp).clip(CircleShape).background(Color(category.color)))
+                        Text(category.name, Modifier.weight(1f).padding(start = 14.dp), fontWeight = FontWeight.SemiBold)
+                        IconButton(onClick = { editing = category }) { Icon(Icons.Outlined.Edit, "Edit category") }
+                        if (category.name != "General") IconButton(onClick = { deleting = category }) { Icon(Icons.Outlined.Delete, "Delete category") }
+                    }
+                }
+            }
+        }
+    }
+    if (adding) CategoryDialog(null, { adding = false }) { name, color -> viewModel.addCategory(name, color); adding = false }
+    editing?.let { category -> CategoryDialog(category, { editing = null }) { name, color -> viewModel.updateCategory(category.name, name, color); editing = null } }
+    deleting?.let { category -> AlertDialog(
+        onDismissRequest = { deleting = null }, title = { Text("Delete ${category.name}?") },
+        text = { Text("Events in this category will move to General. No events or logs will be deleted.") },
+        dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
+        confirmButton = { Button(onClick = { viewModel.deleteCategory(category); deleting = null }) { Text("Delete") } }
+    ) }
+}
+
+@Composable
+private fun CategoryDialog(initial: EventCategory?, dismiss: () -> Unit, save: (String, Long) -> Unit) {
+    var name by remember(initial) { mutableStateOf(initial?.name.orEmpty()) }
+    var color by remember(initial) { mutableLongStateOf(initial?.color ?: swatches.first()) }
+    AlertDialog(
+        onDismissRequest = dismiss, title = { Text(if (initial == null) "Create category" else "Edit category") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            OutlinedTextField(name, { name = it }, label = { Text("Category name") }, enabled = initial?.name != "General", singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("Color", style = MaterialTheme.typography.labelLarge)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { swatches.forEach { item -> Box(Modifier.size(if (color == item) 42.dp else 34.dp).clip(CircleShape).background(Color(item)).clickable { color = item }) } }
+        } },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+        confirmButton = { Button(onClick = { save(name, color) }, enabled = name.isNotBlank()) { Text("Save") } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBack: () -> Unit, export: () -> Unit, import: () -> Unit) {
+    Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } }) }) { padding ->
+        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             item {
                 Text("Appearance", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ThemeMode.entries.forEach { mode ->
-                        if (mode == theme) Button(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
-                        else OutlinedButton(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
-                    }
-                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { ThemeMode.entries.forEach { mode ->
+                    if (mode == theme) Button(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
+                    else OutlinedButton(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
+                } }
             }
             item { HorizontalDivider() }
             item {
                 Text("Your data", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text("Everything stays on this device. Logy never requests internet access.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
-                SettingsAction(Icons.Outlined.Download, "Export CSV backup", "Save all events and entries to a file", export)
+                SettingsAction(Icons.Outlined.Download, "Export CSV backup", "Save categories, events, logs, and durations", export)
                 Spacer(Modifier.height(10.dp))
-                SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Replace local data from a Logy file", import)
+                SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1 and v2 backups", import)
             }
             item { HorizontalDivider() }
-            item {
-                Text("Logy 1.0", fontWeight = FontWeight.SemiBold)
-                Text("Private, offline, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            item { Text("Logy 2.0", fontWeight = FontWeight.SemiBold); Text("Private, offline, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
 
 @Composable
 private fun SettingsAction(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String, action: () -> Unit) {
-    Card(
-        Modifier.fillMaxWidth().clickable(onClick = action),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
-    ) {
+    Card(Modifier.fillMaxWidth().clickable(onClick = action), shape = RoundedCornerShape(20.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             FilledIconButton(onClick = action) { Icon(icon, null) }
-            Column(Modifier.padding(start = 14.dp)) {
-                Text(title, fontWeight = FontWeight.SemiBold)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            Column(Modifier.padding(start = 14.dp)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }
