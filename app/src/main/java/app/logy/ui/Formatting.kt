@@ -8,6 +8,9 @@ import kotlin.math.abs
 fun formatDateTime(time: Long): String =
     SimpleDateFormat("d MMM yyyy, h:mm a", Locale.getDefault()).format(Date(time))
 
+fun formatDate(time: Long): String =
+    SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(time))
+
 fun formatElapsed(time: Long?, now: Long = System.currentTimeMillis()): String {
     if (time == null) return "No entries yet"
     val seconds = abs(now - time) / 1000

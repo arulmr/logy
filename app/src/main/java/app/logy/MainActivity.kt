@@ -2,8 +2,10 @@ package app.logy
 
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
@@ -42,6 +45,7 @@ import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -91,10 +95,12 @@ import app.logy.data.EventEntry
 import app.logy.data.EventSummary
 import app.logy.data.TrackedEvent
 import app.logy.ui.LogyTheme
+import app.logy.ui.formatDate
 import app.logy.ui.formatDateTime
 import app.logy.ui.formatDuration
 import app.logy.ui.formatElapsed
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.Calendar
 
 class MainActivity : ComponentActivity() {
@@ -177,14 +183,25 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
     val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
     var query by rememberSaveable { mutableStateOf("") }
+    var fromDate by rememberSaveable { mutableStateOf<Long?>(null) }
+    var toDate by rememberSaveable { mutableStateOf<Long?>(null) }
+    var choosingDates by remember { mutableStateOf(false) }
     var addingEvent by remember { mutableStateOf(false) }
     var loggingEventId by remember { mutableStateOf<Long?>(null) }
-    val matchingLogs = remember(allEntries, query) {
-        if (query.isBlank()) emptyMap() else allEntries.filter { it.note.contains(query.trim(), true) }.groupBy { it.eventId }
+    val hasDateRange = fromDate != null && toDate != null
+    val rangedLogs = remember(allEntries, fromDate, toDate) {
+        if (!hasDateRange) allEntries else allEntries.filter { it.occurredAt in fromDate!!..toDate!! }
     }
-    val filtered = remember(events, query, matchingLogs) {
-        if (query.isBlank()) events else events.filter {
-            it.name.contains(query.trim(), true) || it.category.contains(query.trim(), true) || matchingLogs.containsKey(it.id)
+    val periodStats = remember(rangedLogs) { rangedLogs.groupBy { it.eventId } }
+    val matchingLogs = remember(rangedLogs, query) {
+        if (query.isBlank()) emptyMap() else rangedLogs.filter { it.note.contains(query.trim(), true) }.groupBy { it.eventId }
+    }
+    val filtered = remember(events, query, matchingLogs, hasDateRange, periodStats) {
+        events.filter { event ->
+            val matchesText = query.isBlank() || event.name.contains(query.trim(), true) ||
+                event.category.contains(query.trim(), true) || matchingLogs.containsKey(event.id)
+            val matchesDate = !hasDateRange || periodStats.containsKey(event.id)
+            matchesText && matchesDate
         }
     }
 
@@ -211,15 +228,33 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
                     value = query, onValueChange = { query = it },
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
                     leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                    trailingIcon = if (query.isNotEmpty()) {{ IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, "Clear") } }} else null,
+                    trailingIcon = { Row {
+                        if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, "Clear search") }
+                        IconButton(onClick = { choosingDates = true }) { Icon(Icons.Outlined.CalendarMonth, "Select date range", tint = if (hasDateRange) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                    } },
                     placeholder = { Text("Search events and log notes") }, singleLine = true,
                     shape = RoundedCornerShape(28.dp)
                 )
+                if (hasDateRange) {
+                    Surface(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                        shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Row(Modifier.fillMaxWidth().padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("${formatDate(fromDate!!)} – ${formatDate(toDate!!)}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                            IconButton(onClick = { fromDate = null; toDate = null }) { Icon(Icons.Outlined.Close, "Clear date range") }
+                        }
+                    }
+                }
             }
-            if (filtered.isEmpty()) item { EmptyState(query.isNotBlank()) { addingEvent = true } }
+            if (filtered.isEmpty()) item { EmptyState(query.isNotBlank() || hasDateRange) { addingEvent = true } }
             items(filtered, key = { it.id }) { event ->
+                val logs = periodStats[event.id].orEmpty()
                 EventRow(
                     event = event, matches = matchingLogs[event.id].orEmpty(), searching = query.isNotBlank(),
+                    displayedLogCount = if (hasDateRange) logs.size else event.entryCount,
+                    displayedDuration = if (hasDateRange) logs.sumOf { it.durationMinutes ?: 0 } else null,
+                    periodSelected = hasDateRange,
                     open = { openEvent(event.id) }, addLog = { loggingEventId = event.id }
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
@@ -236,20 +271,36 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
             viewModel.addEntry(id, time, note, duration); loggingEventId = null
         }
     }
+    if (choosingDates) DateRangeDialog(
+        initialFrom = fromDate, initialTo = toDate, dismiss = { choosingDates = false },
+        apply = { from, to -> fromDate = from; toDate = to; choosingDates = false }
+    )
 }
 
 @Composable
-private fun EventRow(event: EventSummary, matches: List<EventEntry>, searching: Boolean, open: () -> Unit, addLog: () -> Unit) {
+private fun EventRow(
+    event: EventSummary,
+    matches: List<EventEntry>,
+    searching: Boolean,
+    displayedLogCount: Int,
+    displayedDuration: Int?,
+    periodSelected: Boolean,
+    open: () -> Unit,
+    addLog: () -> Unit
+) {
     Column(Modifier.fillMaxWidth().clickable(onClick = open).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(Color(event.color)))
-            Text(event.name, Modifier.weight(1f).padding(start = 10.dp), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (event.lastEntry != null) Text(formatDateTime(event.lastEntry), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Text(event.name, Modifier.weight(1f), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (event.lastEntry != null) Text(
+                formatDateTime(event.lastEntry),
+                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(onClick = addLog).padding(6.dp),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary
+            )
             IconButton(onClick = addLog, modifier = Modifier.size(40.dp)) { Icon(Icons.Outlined.Add, "Add log", tint = MaterialTheme.colorScheme.primary) }
         }
-        if (!event.lastNote.isNullOrBlank()) Text(event.lastNote, Modifier.padding(start = 20.dp, end = 8.dp, top = 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (!event.lastNote.isNullOrBlank()) Text(event.lastNote, Modifier.padding(end = 8.dp, top = 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (searching && matches.isNotEmpty()) {
-            Column(Modifier.padding(start = 20.dp, top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 matches.take(3).forEach { log ->
                     Text("• ${log.note}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(formatDateTime(log.occurredAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -257,14 +308,45 @@ private fun EventRow(event: EventSummary, matches: List<EventEntry>, searching: 
                 if (matches.size > 3) Text("+${matches.size - 3} more matching logs", style = MaterialTheme.typography.labelSmall)
             }
         }
-        Row(Modifier.fillMaxWidth().padding(start = 20.dp, top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().padding(top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
             LabelPill(event.category)
+            Text(
+                if (periodSelected) "$displayedLogCount logs • ${formatDuration(displayedDuration ?: 0)} total" else "$displayedLogCount ${if (displayedLogCount == 1) "log" else "logs"}",
+                Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             Spacer(Modifier.weight(1f))
-            Surface(shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+            Surface(modifier = Modifier.clickable(onClick = addLog), shape = RoundedCornerShape(50), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
                 Text(formatElapsed(event.lastEntry), Modifier.padding(horizontal = 10.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
             }
         }
     }
+}
+
+@Composable
+private fun DateRangeDialog(initialFrom: Long?, initialTo: Long?, dismiss: () -> Unit, apply: (Long, Long) -> Unit) {
+    var from by remember(initialFrom) { mutableStateOf(initialFrom) }
+    var to by remember(initialTo) { mutableStateOf(initialTo) }
+    val context = LocalContext.current
+    fun pick(current: Long?, endOfDay: Boolean, selected: (Long) -> Unit) {
+        val calendar = Calendar.getInstance().apply { timeInMillis = current ?: System.currentTimeMillis() }
+        DatePickerDialog(context, { _, year, month, day ->
+            calendar.set(year, month, day, if (endOfDay) 23 else 0, if (endOfDay) 59 else 0, if (endOfDay) 59 else 0)
+            calendar.set(Calendar.MILLISECOND, if (endOfDay) 999 else 0)
+            selected(calendar.timeInMillis)
+        }, calendar.get(Calendar.YEAR), calendar.get(Calendar.MONTH), calendar.get(Calendar.DAY_OF_MONTH)).show()
+    }
+    val valid = from != null && to != null && from!! <= to!!
+    AlertDialog(
+        onDismissRequest = dismiss, icon = { Icon(Icons.Outlined.CalendarMonth, null) }, title = { Text("Filter by date") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { pick(from, false) { from = it } }, modifier = Modifier.fillMaxWidth()) { Text(from?.let { "From: ${formatDate(it)}" } ?: "Select from date") }
+            OutlinedButton(onClick = { pick(to, true) { to = it } }, modifier = Modifier.fillMaxWidth()) { Text(to?.let { "To: ${formatDate(it)}" } ?: "Select to date") }
+            if (from != null && to != null && from!! > to!!) Text("The from date must be before the to date.", color = MaterialTheme.colorScheme.error)
+        } },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
+        confirmButton = { Button(onClick = { apply(from!!, to!!) }, enabled = valid) { Text("Apply") } }
+    )
 }
 
 @Composable
@@ -330,6 +412,7 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
     var adding by remember { mutableStateOf(false) }
     var editingEvent by remember { mutableStateOf(false) }
     var editingEntry by remember { mutableStateOf<EventEntry?>(null) }
+    var deletingEntry by remember { mutableStateOf<EventEntry?>(null) }
     var deletingEvent by remember { mutableStateOf(false) }
     val filtered = remember(entries, query) { if (query.isBlank()) entries else entries.filter { it.note.contains(query.trim(), true) } }
 
@@ -365,12 +448,18 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
                 )
             } }
             if (filtered.isEmpty()) item { EmptyHistory(hasQuery = query.isNotBlank()) { adding = true } }
-            items(filtered, key = { it.id }) { entry -> EntryCard(entry, edit = { editingEntry = entry }, delete = { viewModel.deleteEntry(entry) }) }
+            items(filtered, key = { it.id }) { entry -> EntryCard(entry, edit = { editingEntry = entry }, delete = { deletingEntry = entry }) }
         }
     }
 
     if (adding) EntryDialog(null, { adding = false }) { time, note, duration -> viewModel.addEntry(id, time, note, duration); adding = false }
     editingEntry?.let { entry -> EntryDialog(entry, { editingEntry = null }) { time, note, duration -> viewModel.updateEntry(entry, time, note, duration); editingEntry = null } }
+    deletingEntry?.let { entry -> AlertDialog(
+        onDismissRequest = { deletingEntry = null }, title = { Text("Delete this log?") },
+        text = { Text("This log will be permanently removed. This action cannot be undone.") },
+        dismissButton = { TextButton(onClick = { deletingEntry = null }) { Text("Cancel") } },
+        confirmButton = { Button(onClick = { viewModel.deleteEntry(entry); deletingEntry = null }) { Text("Delete") } }
+    ) }
     if (editingEvent) event?.let { current -> EventDialog(categories, current, { editingEvent = false }) { name, category, color -> viewModel.updateEvent(current, name, category, color); editingEvent = false } }
     if (deletingEvent) AlertDialog(
         onDismissRequest = { deletingEvent = false }, title = { Text("Delete this event?") },
@@ -493,6 +582,24 @@ private fun CategoryDialog(initial: EventCategory?, dismiss: () -> Unit, save: (
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBack: () -> Unit, export: () -> Unit, import: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
+    var downloadedApk by remember { mutableStateOf<File?>(null) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        downloadedApk?.let { apk ->
+            if (context.packageManager.canRequestPackageInstalls()) UpdateManager.install(context, apk)
+            else updateMessage = "Allow installs from Logy, then tap Check for updates again."
+        }
+    }
+    fun installOrRequest(apk: File) {
+        if (context.packageManager.canRequestPackageInstalls()) UpdateManager.install(context, apk)
+        else permissionLauncher.launch(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}")))
+    }
+
     Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } }) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
             item {
@@ -505,17 +612,54 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
             }
             item { HorizontalDivider() }
             item {
+                Text("Updates", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Check GitHub Releases and install updates without copying APK files.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                SettingsAction(
+                    Icons.Outlined.SystemUpdate,
+                    if (checking) "Checking GitHub…" else "Check for updates",
+                    "Network access is used only when you request an update check"
+                ) {
+                    if (!checking) scope.launch {
+                        checking = true; updateMessage = null
+                        runCatching { UpdateManager.check(context) }
+                            .onSuccess { available -> if (available == null) updateMessage = "Logy is up to date." else updateInfo = available }
+                            .onFailure { updateMessage = it.message ?: "Update check failed." }
+                        checking = false
+                    }
+                }
+                updateMessage?.let { Text(it, Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.primary) }
+            }
+            item { HorizontalDivider() }
+            item {
                 Text("Your data", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Text("Everything stays on this device. Logy never requests internet access.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Your events and logs stay on this device and are never uploaded.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(16.dp))
                 SettingsAction(Icons.Outlined.Download, "Export CSV backup", "Save categories, events, logs, and durations", export)
                 Spacer(Modifier.height(10.dp))
                 SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1 and v2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 2.0", fontWeight = FontWeight.SemiBold); Text("Private, offline, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 2.1", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
+
+    updateInfo?.let { update -> AlertDialog(
+        onDismissRequest = { if (!downloading) updateInfo = null },
+        icon = { Icon(Icons.Outlined.SystemUpdate, null) },
+        title = { Text("Logy ${update.version} is available") },
+        text = { Text(if (downloading) "Downloading the signed APK from GitHub…" else "Download the release and open Android's installer?") },
+        dismissButton = { TextButton(onClick = { updateInfo = null }, enabled = !downloading) { Text("Later") } },
+        confirmButton = { Button(onClick = {
+            if (!downloading) scope.launch {
+                downloading = true
+                runCatching { UpdateManager.download(context, update) }
+                    .onSuccess { apk -> downloadedApk = apk; updateInfo = null; installOrRequest(apk) }
+                    .onFailure { updateMessage = it.message ?: "Download failed."; updateInfo = null }
+                downloading = false
+            }
+        }, enabled = !downloading) { Text(if (downloading) "Downloading…" else "Download & install") } }
+    ) }
 }
 
 @Composable
