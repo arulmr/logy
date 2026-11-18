@@ -1,4 +1,4 @@
-# Logy 2.4
+# Logy 3.0
 
 Logy is a private, local-first Android app for remembering when things happened.
 
@@ -9,6 +9,7 @@ Logy is a private, local-first Android app for remembering when things happened.
 - Add or edit timestamped logs with optional notes and durations
 - Reuse prior notes with latest-first autocomplete suggestions while typing
 - Sort events by oldest log, newest log, or name, and filter the home screen by category
+- Protect the app with a four-digit PIN and optional device biometric unlock
 - Mark logs active or inactive; new logs are active by default
 - Add logs directly from the home screen
 - Tap the add button, latest timestamp, or elapsed-time pill to add a log

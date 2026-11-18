@@ -1,6 +1,6 @@
 package app.logy.data
 
-fun matchingNoteSuggestions(entries: List<EventEntry>, query: String, limit: Int = 6): List<String> {
+fun matchingNoteSuggestions(entries: List<EventEntry>, query: String, limit: Int = 5): List<String> {
     val value = query.trim()
     if (value.isEmpty()) return emptyList()
     return entries.asSequence()

@@ -6,13 +6,14 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,6 +34,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Backspace
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Category
@@ -41,6 +43,8 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Fingerprint
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
@@ -74,8 +78,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,7 +98,12 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.logy.data.EventCategory
 import app.logy.data.EventEntry
 import app.logy.data.EventSummary
@@ -109,14 +120,169 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Calendar
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val viewModel: LogyViewModel by viewModels()
+    private lateinit var pinSecurity: PinSecurity
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pinSecurity = PinSecurity(this)
         enableEdgeToEdge()
         setContent {
             val theme by viewModel.theme.collectAsStateWithLifecycle()
-            LogyTheme(theme) { LogyApp(viewModel) }
+            var securityVersion by remember { mutableIntStateOf(0) }
+            val hasPin = remember(securityVersion) { pinSecurity.hasPin() }
+            val biometricEnabled = remember(securityVersion) { pinSecurity.isBiometricEnabled() }
+            val biometricAvailable = remember {
+                BiometricManager.from(this).canAuthenticate(BIOMETRIC_AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
+            }
+            var unlocked by remember { mutableStateOf(!hasPin) }
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner, hasPin) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_STOP && hasPin) unlocked = false
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+            }
+
+            LogyTheme(theme) {
+                if (hasPin && !unlocked) {
+                    PinLockScreen(
+                        verifyPin = pinSecurity::verify,
+                        biometricAvailable = biometricAvailable && biometricEnabled,
+                        useBiometric = { authenticateWithBiometric { unlocked = true } },
+                        unlock = { unlocked = true }
+                    )
+                } else {
+                    LogyApp(
+                        viewModel = viewModel,
+                        hasPin = hasPin,
+                        biometricAvailable = biometricAvailable,
+                        biometricEnabled = biometricEnabled,
+                        verifyPin = pinSecurity::verify,
+                        setPin = { pin -> pinSecurity.setPin(pin); securityVersion++ },
+                        removePin = { pinSecurity.removePin(); securityVersion++ },
+                        setBiometric = { enabled -> pinSecurity.setBiometricEnabled(enabled); securityVersion++ }
+                    )
+                }
+            }
+        }
+    }
+
+    private fun authenticateWithBiometric(onSuccess: () -> Unit) {
+        val prompt = BiometricPrompt(this, ContextCompat.getMainExecutor(this), object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                super.onAuthenticationSucceeded(result)
+                onSuccess()
+            }
+        })
+        val info = BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Unlock Logy")
+            .setSubtitle("Use your device biometric")
+            .setAllowedAuthenticators(BIOMETRIC_AUTHENTICATORS)
+            .setNegativeButtonText("Use PIN")
+            .build()
+        prompt.authenticate(info)
+    }
+
+    private companion object {
+        const val BIOMETRIC_AUTHENTICATORS = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+            BiometricManager.Authenticators.BIOMETRIC_WEAK
+    }
+}
+
+@Composable
+private fun PinLockScreen(
+    verifyPin: (String) -> Boolean,
+    biometricAvailable: Boolean,
+    useBiometric: () -> Unit,
+    unlock: () -> Unit
+) {
+    var pin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    BackHandler { }
+    Scaffold { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).padding(horizontal = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primaryContainer) {
+                Icon(Icons.Outlined.Lock, null, Modifier.padding(18.dp).size(34.dp), tint = MaterialTheme.colorScheme.primary)
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Unlock Logy", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Enter your four-digit PIN", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(22.dp))
+            PinDots(pin.length)
+            error?.let { Text(it, Modifier.padding(top = 10.dp), color = MaterialTheme.colorScheme.error) }
+            Spacer(Modifier.height(18.dp))
+            PinKeypad(
+                addDigit = { digit ->
+                    if (pin.length < 4) {
+                        val next = pin + digit
+                        pin = next
+                        error = null
+                        if (next.length == 4) {
+                            if (verifyPin(next)) unlock() else { pin = ""; error = "Incorrect PIN" }
+                        }
+                    }
+                },
+                backspace = { pin = pin.dropLast(1); error = null }
+            )
+            if (biometricAvailable) {
+                TextButton(onClick = useBiometric, modifier = Modifier.padding(top = 10.dp)) {
+                    Icon(Icons.Outlined.Fingerprint, null)
+                    Text("Use biometric", Modifier.padding(start = 8.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PinDots(length: Int) {
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        repeat(4) { index ->
+            Surface(
+                modifier = Modifier.size(16.dp),
+                shape = CircleShape,
+                color = if (index < length) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest
+            ) { }
+        }
+    }
+}
+
+@Composable
+private fun PinKeypad(addDigit: (String) -> Unit, backspace: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9")).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                row.forEach { digit -> PinKey(digit) { addDigit(digit) } }
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Spacer(Modifier.size(68.dp))
+            PinKey("0") { addDigit("0") }
+            Surface(
+                modifier = Modifier.size(68.dp).clip(CircleShape).clickable(onClick = backspace),
+                shape = CircleShape,
+                color = Color.Transparent
+            ) { Box(contentAlignment = Alignment.Center) { Icon(Icons.AutoMirrored.Outlined.Backspace, "Delete digit") } }
+        }
+    }
+}
+
+@Composable
+private fun PinKey(digit: String, select: () -> Unit) {
+    Surface(
+        modifier = Modifier.size(68.dp).clip(CircleShape).clickable(onClick = select),
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(digit, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -124,7 +290,16 @@ class MainActivity : ComponentActivity() {
 private enum class Page { HOME, CATEGORIES, SETTINGS, DETAIL }
 
 @Composable
-private fun LogyApp(viewModel: LogyViewModel) {
+private fun LogyApp(
+    viewModel: LogyViewModel,
+    hasPin: Boolean,
+    biometricAvailable: Boolean,
+    biometricEnabled: Boolean,
+    verifyPin: (String) -> Boolean,
+    setPin: (String) -> Unit,
+    removePin: () -> Unit,
+    setBiometric: (Boolean) -> Unit
+) {
     var page by rememberSaveable { mutableStateOf(Page.HOME) }
     var selectedId by rememberSaveable { mutableLongStateOf(0L) }
     var pendingImport by remember { mutableStateOf<Uri?>(null) }
@@ -156,7 +331,9 @@ private fun LogyApp(viewModel: LogyViewModel) {
                         theme = viewModel.theme.collectAsStateWithLifecycle().value,
                         onTheme = viewModel::setTheme, goBack = { page = Page.HOME },
                         export = { exportLauncher.launch("logy-v2-backup.csv") },
-                        import = { importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain")) }
+                        import = { importLauncher.launch(arrayOf("text/csv", "text/comma-separated-values", "text/plain")) },
+                        hasPin = hasPin, biometricAvailable = biometricAvailable, biometricEnabled = biometricEnabled,
+                        verifyPin = verifyPin, setPin = setPin, removePin = removePin, setBiometric = setBiometric
                     )
                     Page.DETAIL -> DetailScreen(selectedId, viewModel) { page = Page.HOME }
                 }
@@ -307,7 +484,7 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
                 val logs = periodStats[event.id].orEmpty()
                 EventRow(
                     event = event, matches = matchingLogs[event.id].orEmpty(), searching = query.isNotBlank(),
-                    displayedLogCount = if (hasDateRange) logs.size else event.entryCount,
+                    displayedLogCount = if (query.isNotBlank()) matchingLogs[event.id].orEmpty().size else if (hasDateRange) logs.size else event.entryCount,
                     displayedDuration = if (hasDateRange) logs.sumOf { it.durationMinutes ?: 0 } else null,
                     periodSelected = hasDateRange,
                     open = { openEvent(event.id) }, addLog = { loggingEventId = event.id }
@@ -322,7 +499,7 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
         save = { name, category, color -> viewModel.addEvent(name, category, color); addingEvent = false }
     )
     loggingEventId?.let { id ->
-        EntryDialog(initial = null, existingEntries = allEntries.filter { it.eventId == id }, dismiss = { loggingEventId = null }) { time, note, duration, active ->
+        EntryDialog(initial = null, existingEntries = allEntries, dismiss = { loggingEventId = null }) { time, note, duration, active ->
             viewModel.addEntry(id, time, note, duration, active); loggingEventId = null
         }
     }
@@ -356,17 +533,21 @@ private fun EventRow(
         if (!event.lastNote.isNullOrBlank()) Text(event.lastNote, Modifier.padding(end = 8.dp, top = 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (searching && matches.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                matches.take(3).forEach { log ->
+                matches.take(5).forEach { log ->
                     Text("• ${log.note}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(formatDateTime(log.occurredAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (matches.size > 3) Text("+${matches.size - 3} more matching logs", style = MaterialTheme.typography.labelSmall)
+                if (matches.size > 5) Text("+${matches.size - 5} more matching logs", style = MaterialTheme.typography.labelSmall)
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
             LabelPill(event.category)
             Text(
-                if (periodSelected) "$displayedLogCount logs • ${formatDuration(displayedDuration ?: 0)} total" else "$displayedLogCount ${if (displayedLogCount == 1) "log" else "logs"}",
+                when {
+                    searching -> "$displayedLogCount matching ${if (displayedLogCount == 1) "log" else "logs"}"
+                    periodSelected -> "$displayedLogCount logs • ${formatDuration(displayedDuration ?: 0)} total"
+                    else -> "$displayedLogCount ${if (displayedLogCount == 1) "log" else "logs"}"
+                },
                 Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -462,6 +643,7 @@ private fun EventDialog(categories: List<EventCategory>, initial: TrackedEvent?,
 private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit) {
     val event by remember(id) { viewModel.event(id) }.collectAsStateWithLifecycle(initialValue = null)
     val entries by remember(id) { viewModel.entries(id) }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
     var query by rememberSaveable(id) { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
@@ -469,7 +651,7 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
     var editingEntry by remember { mutableStateOf<EventEntry?>(null) }
     var deletingEntry by remember { mutableStateOf<EventEntry?>(null) }
     var deletingEvent by remember { mutableStateOf(false) }
-    val filtered = remember(entries, query) { if (query.isBlank()) entries else entries.filter { it.note.contains(query.trim(), true) } }
+    val filtered = remember(entries, query) { if (query.isBlank()) entries else entries.filter { it.note.contains(query.trim(), true) }.take(5) }
 
     Scaffold(
         topBar = { CenterAlignedTopAppBar(
@@ -507,8 +689,8 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
         }
     }
 
-    if (adding) EntryDialog(null, entries, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
-    editingEntry?.let { entry -> EntryDialog(entry, entries, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
+    if (adding) EntryDialog(null, allEntries, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
+    editingEntry?.let { entry -> EntryDialog(entry, allEntries, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
     deletingEntry?.let { entry -> AlertDialog(
         onDismissRequest = { deletingEntry = null }, title = { Text("Delete this log?") },
         text = { Text("This log will be permanently removed. This action cannot be undone.") },
@@ -611,7 +793,7 @@ private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Checkbox(checked = active, onCheckedChange = { active = it })
-                Column { Text("Active", fontWeight = FontWeight.SemiBold); Text("New logs are active by default", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Text("Active", fontWeight = FontWeight.SemiBold)
             }
         } },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
@@ -672,7 +854,20 @@ private fun CategoryDialog(initial: EventCategory?, dismiss: () -> Unit, save: (
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBack: () -> Unit, export: () -> Unit, import: () -> Unit) {
+private fun SettingsScreen(
+    theme: ThemeMode,
+    onTheme: (ThemeMode) -> Unit,
+    goBack: () -> Unit,
+    export: () -> Unit,
+    import: () -> Unit,
+    hasPin: Boolean,
+    biometricAvailable: Boolean,
+    biometricEnabled: Boolean,
+    verifyPin: (String) -> Boolean,
+    setPin: (String) -> Unit,
+    removePin: () -> Unit,
+    setBiometric: (Boolean) -> Unit
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var checking by remember { mutableStateOf(false) }
@@ -680,6 +875,8 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
     var updateInfo by remember { mutableStateOf<UpdateInfo?>(null) }
     var downloadedApk by remember { mutableStateOf<File?>(null) }
     var updateMessage by remember { mutableStateOf<String?>(null) }
+    var managingPin by remember { mutableStateOf(false) }
+    var removingPin by remember { mutableStateOf(false) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         downloadedApk?.let { apk ->
             if (context.packageManager.canRequestPackageInstalls()) UpdateManager.install(context, apk)
@@ -700,6 +897,44 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
                     if (mode == theme) Button(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
                     else OutlinedButton(onClick = { onTheme(mode) }, modifier = Modifier.weight(1f)) { Text(mode.name.lowercase().replaceFirstChar(Char::uppercase)) }
                 } }
+            }
+            item { HorizontalDivider() }
+            item {
+                Text("Security", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text("Protect local data when Logy is opened or resumed.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                SettingsAction(
+                    Icons.Outlined.Lock,
+                    if (hasPin) "Change login PIN" else "Set login PIN",
+                    "Use Logy's numeric keypad to enter a four-digit PIN"
+                ) { managingPin = true }
+                if (hasPin) {
+                    Spacer(Modifier.height(10.dp))
+                    Card(
+                        Modifier.fillMaxWidth().clickable(enabled = biometricAvailable) { setBiometric(!biometricEnabled) },
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+                    ) {
+                        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Fingerprint, null, tint = MaterialTheme.colorScheme.primary)
+                            Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+                                Text("Biometric unlock", fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    if (biometricAvailable) "Use an enrolled device biometric instead of the PIN" else "No enrolled biometric is available",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Checkbox(
+                                checked = biometricEnabled && biometricAvailable,
+                                onCheckedChange = { setBiometric(it) },
+                                enabled = biometricAvailable
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    SettingsAction(Icons.Outlined.Delete, "Remove login PIN", "Turn off PIN and biometric app lock") { removingPin = true }
+                }
             }
             item { HorizontalDivider() }
             item {
@@ -731,7 +966,7 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
                 SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1, v2, and v2.2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 2.4", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 3.0", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 
@@ -751,6 +986,110 @@ private fun SettingsScreen(theme: ThemeMode, onTheme: (ThemeMode) -> Unit, goBac
             }
         }, enabled = !downloading) { Text(if (downloading) "Downloading…" else "Download & install") } }
     ) }
+    if (managingPin) PinSetupDialog(
+        changingExisting = hasPin,
+        verifyPin = verifyPin,
+        dismiss = { managingPin = false },
+        save = { pin -> setPin(pin); managingPin = false }
+    )
+    if (removingPin) PinRemoveDialog(
+        verifyPin = verifyPin,
+        dismiss = { removingPin = false },
+        remove = { removePin(); removingPin = false }
+    )
+}
+
+private enum class PinSetupStep { CURRENT, NEW, CONFIRM }
+
+@Composable
+private fun PinSetupDialog(
+    changingExisting: Boolean,
+    verifyPin: (String) -> Boolean,
+    dismiss: () -> Unit,
+    save: (String) -> Unit
+) {
+    var step by remember { mutableStateOf(if (changingExisting) PinSetupStep.CURRENT else PinSetupStep.NEW) }
+    var input by remember { mutableStateOf("") }
+    var firstPin by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    val prompt = when (step) {
+        PinSetupStep.CURRENT -> "Enter current PIN"
+        PinSetupStep.NEW -> "Enter new four-digit PIN"
+        PinSetupStep.CONFIRM -> "Confirm new PIN"
+    }
+    fun acceptDigit(digit: String) {
+        if (input.length >= 4) return
+        val next = input + digit
+        input = next
+        error = null
+        if (next.length != 4) return
+        when (step) {
+            PinSetupStep.CURRENT -> {
+                if (verifyPin(next)) { step = PinSetupStep.NEW; input = "" }
+                else { input = ""; error = "Incorrect PIN" }
+            }
+            PinSetupStep.NEW -> { firstPin = next; step = PinSetupStep.CONFIRM; input = "" }
+            PinSetupStep.CONFIRM -> {
+                if (next == firstPin) save(next)
+                else { input = ""; error = "PINs do not match. Try again." }
+            }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        icon = { Icon(Icons.Outlined.Lock, null) },
+        title = { Text(if (changingExisting) "Change login PIN" else "Set login PIN") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(prompt, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                PinDots(input.length)
+                error?.let { Text(it, Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.error) }
+                Spacer(Modifier.height(16.dp))
+                PinKeypad(
+                    addDigit = ::acceptDigit,
+                    backspace = { input = input.dropLast(1); error = null }
+                )
+            }
+        },
+        confirmButton = { },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
+private fun PinRemoveDialog(verifyPin: (String) -> Boolean, dismiss: () -> Unit, remove: () -> Unit) {
+    var input by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    fun acceptDigit(digit: String) {
+        if (input.length >= 4) return
+        val next = input + digit
+        input = next
+        error = null
+        if (next.length == 4) {
+            if (verifyPin(next)) remove() else { input = ""; error = "Incorrect PIN" }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        icon = { Icon(Icons.Outlined.Delete, null) },
+        title = { Text("Remove login PIN?") },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Enter the current PIN to turn off app lock.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(16.dp))
+                PinDots(input.length)
+                error?.let { Text(it, Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.error) }
+                Spacer(Modifier.height(16.dp))
+                PinKeypad(
+                    addDigit = ::acceptDigit,
+                    backspace = { input = input.dropLast(1); error = null }
+                )
+            }
+        },
+        confirmButton = { },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable

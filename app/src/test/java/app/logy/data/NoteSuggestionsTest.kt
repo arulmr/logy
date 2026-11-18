@@ -23,4 +23,16 @@ class NoteSuggestionsTest {
         assertTrue(matchingNoteSuggestions(entries, "").isEmpty())
         assertTrue(matchingNoteSuggestions(entries, "morning walk").isEmpty())
     }
+
+    @Test
+    fun limitsSuggestionsToFiveMostRecentMatches() {
+        val entries = (1L..7L).map { id ->
+            EventEntry(id = id, eventId = id, occurredAt = id * 100, note = "Shared note $id")
+        }
+
+        assertEquals(
+            listOf("Shared note 7", "Shared note 6", "Shared note 5", "Shared note 4", "Shared note 3"),
+            matchingNoteSuggestions(entries, "shared")
+        )
+    }
 }

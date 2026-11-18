@@ -15,8 +15,8 @@ android {
         applicationId = "app.logy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.4.0"
+        versionCode = 7
+        versionName = "3.0.0"
     }
 
     buildTypes {
@@ -53,6 +53,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.1")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")
+    implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.room:room-runtime:2.7.2")
     implementation("androidx.room:room-ktx:2.7.2")
     kapt("androidx.room:room-compiler:2.7.2")
