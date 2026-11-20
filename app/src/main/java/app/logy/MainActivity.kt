@@ -36,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Backspace
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Category
 import androidx.compose.material.icons.outlined.Close
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.outlined.Upload
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -91,10 +93,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -110,6 +119,8 @@ import app.logy.data.EventSummary
 import app.logy.data.EventSort
 import app.logy.data.TrackedEvent
 import app.logy.data.applyEventListOptions
+import app.logy.data.applySearchResultTimestamps
+import app.logy.data.includeEventForDateRange
 import app.logy.data.matchingNoteSuggestions
 import app.logy.ui.LogyTheme
 import app.logy.ui.formatDate
@@ -287,7 +298,7 @@ private fun PinKey(digit: String, select: () -> Unit) {
     }
 }
 
-private enum class Page { HOME, CATEGORIES, SETTINGS, DETAIL }
+private enum class Page { HOME, CATEGORIES, ARCHIVED, SETTINGS, DETAIL }
 
 @Composable
 private fun LogyApp(
@@ -323,10 +334,12 @@ private fun LogyApp(
                 when (target) {
                     Page.HOME -> HomeScreen(
                         viewModel, openCategories = { page = Page.CATEGORIES },
+                        openArchived = { page = Page.ARCHIVED },
                         openSettings = { page = Page.SETTINGS },
                         openEvent = { selectedId = it; page = Page.DETAIL }
                     )
                     Page.CATEGORIES -> CategoriesScreen(viewModel) { page = Page.HOME }
+                    Page.ARCHIVED -> ArchivedEventsScreen(viewModel) { page = Page.HOME }
                     Page.SETTINGS -> SettingsScreen(
                         theme = viewModel.theme.collectAsStateWithLifecycle().value,
                         onTheme = viewModel::setTheme, goBack = { page = Page.HOME },
@@ -361,7 +374,7 @@ private fun LogyApp(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, openSettings: () -> Unit, openEvent: (Long) -> Unit) {
+private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, openArchived: () -> Unit, openSettings: () -> Unit, openEvent: (Long) -> Unit) {
     val events by viewModel.events.collectAsStateWithLifecycle()
     val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
     val categories by viewModel.categories.collectAsStateWithLifecycle()
@@ -388,14 +401,17 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
     val matchingLogs = remember(rangedLogs, query) {
         if (query.isBlank()) emptyMap() else rangedLogs.filter { it.note.contains(query.trim(), true) }.groupBy { it.eventId }
     }
-    val filtered = remember(events, query, matchingLogs, hasDateRange, periodStats, categoryFilter, eventSort) {
-        val matchingEvents = events.filter { event ->
+    val activeEvents = remember(events) { events.filterNot { it.archived } }
+    val activeEventIds = remember(activeEvents) { activeEvents.mapTo(mutableSetOf()) { it.id } }
+    val filtered = remember(activeEvents, query, matchingLogs, hasDateRange, periodStats, categoryFilter, eventSort) {
+        val matchingEvents = activeEvents.filter { event ->
             val matchesText = query.isBlank() || event.name.contains(query.trim(), true) ||
                 event.category.contains(query.trim(), true) || matchingLogs.containsKey(event.id)
-            val matchesDate = !hasDateRange || periodStats.containsKey(event.id)
+            val matchesDate = includeEventForDateRange(event, hasDateRange, periodStats.containsKey(event.id))
             matchesText && matchesDate
         }
-        applyEventListOptions(matchingEvents, categoryFilter, eventSort)
+        val resultBasedEvents = if (query.isBlank()) matchingEvents else applySearchResultTimestamps(matchingEvents, matchingLogs)
+        applyEventListOptions(resultBasedEvents, categoryFilter, eventSort)
     }
 
     Scaffold(
@@ -404,6 +420,7 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
                 title = { Text("Logy", fontWeight = FontWeight.Bold) },
                 actions = {
                     IconButton(onClick = openCategories) { Icon(Icons.Outlined.Category, "Categories") }
+                    IconButton(onClick = openArchived) { Icon(Icons.Outlined.Archive, "Archived events") }
                     IconButton(onClick = openSettings) { Icon(Icons.Outlined.Settings, "Settings") }
                 }
             )
@@ -499,7 +516,7 @@ private fun HomeScreen(viewModel: LogyViewModel, openCategories: () -> Unit, ope
         save = { name, category, color -> viewModel.addEvent(name, category, color); addingEvent = false }
     )
     loggingEventId?.let { id ->
-        EntryDialog(initial = null, existingEntries = allEntries, dismiss = { loggingEventId = null }) { time, note, duration, active ->
+        EntryDialog(initial = null, existingEntries = allEntries.filter { it.eventId in activeEventIds }, dismiss = { loggingEventId = null }) { time, note, duration, active ->
             viewModel.addEntry(id, time, note, duration, active); loggingEventId = null
         }
     }
@@ -533,11 +550,11 @@ private fun EventRow(
         if (!event.lastNote.isNullOrBlank()) Text(event.lastNote, Modifier.padding(end = 8.dp, top = 2.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (searching && matches.isNotEmpty()) {
             Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                matches.take(5).forEach { log ->
+                matches.take(3).forEach { log ->
                     Text("• ${log.note}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Text(formatDateTime(log.occurredAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (matches.size > 5) Text("+${matches.size - 5} more matching logs", style = MaterialTheme.typography.labelSmall)
+                if (matches.size > 3) Text("+${matches.size - 3} more matching logs", style = MaterialTheme.typography.labelSmall)
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -644,6 +661,9 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
     val event by remember(id) { viewModel.event(id) }.collectAsStateWithLifecycle(initialValue = null)
     val entries by remember(id) { viewModel.entries(id) }.collectAsStateWithLifecycle(initialValue = emptyList())
     val allEntries by viewModel.allEntries.collectAsStateWithLifecycle()
+    val allEvents by viewModel.events.collectAsStateWithLifecycle()
+    val activeEventIds = remember(allEvents) { allEvents.filterNot { it.archived }.mapTo(mutableSetOf()) { it.id } }
+    val suggestionEntries = remember(allEntries, activeEventIds) { allEntries.filter { it.eventId in activeEventIds } }
     val categories by viewModel.categories.collectAsStateWithLifecycle()
     var query by rememberSaveable(id) { mutableStateOf("") }
     var adding by remember { mutableStateOf(false) }
@@ -658,6 +678,9 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
             title = { Text(event?.name ?: "Event", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } },
             actions = {
+                IconButton(onClick = { event?.let { current -> viewModel.setEventArchived(current.id, !current.archived); goBack() } }) {
+                    Icon(if (event?.archived == true) Icons.Outlined.Unarchive else Icons.Outlined.Archive, if (event?.archived == true) "Restore event" else "Archive event")
+                }
                 IconButton(onClick = { editingEvent = true }) { Icon(Icons.Outlined.Edit, "Edit event") }
                 IconButton(onClick = { deletingEvent = true }) { Icon(Icons.Outlined.Delete, "Delete event") }
             }
@@ -689,8 +712,8 @@ private fun DetailScreen(id: Long, viewModel: LogyViewModel, goBack: () -> Unit)
         }
     }
 
-    if (adding) EntryDialog(null, allEntries, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
-    editingEntry?.let { entry -> EntryDialog(entry, allEntries, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
+    if (adding) EntryDialog(null, suggestionEntries, { adding = false }) { time, note, duration, active -> viewModel.addEntry(id, time, note, duration, active); adding = false }
+    editingEntry?.let { entry -> EntryDialog(entry, suggestionEntries, { editingEntry = null }) { time, note, duration, active -> viewModel.updateEntry(entry, time, note, duration, active); editingEntry = null } }
     deletingEntry?.let { entry -> AlertDialog(
         onDismissRequest = { deletingEntry = null }, title = { Text("Delete this log?") },
         text = { Text("This log will be permanently removed. This action cannot be undone.") },
@@ -740,16 +763,22 @@ private fun EntryCard(entry: EventEntry, edit: () -> Unit, delete: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>, dismiss: () -> Unit, save: (Long, String, Int?, Boolean) -> Unit) {
-    var note by remember(initial) { mutableStateOf(initial?.note.orEmpty()) }
+    var note by remember(initial) {
+        val value = initial?.note.orEmpty()
+        mutableStateOf(TextFieldValue(value, selection = TextRange(value.length)))
+    }
     var suggestionsExpanded by remember { mutableStateOf(false) }
     var timestamp by remember(initial) { mutableLongStateOf(initial?.occurredAt ?: System.currentTimeMillis()) }
     var hours by remember(initial) { mutableStateOf(initial?.durationMinutes?.div(60)?.toString().orEmpty()) }
     var minutes by remember(initial) { mutableStateOf(initial?.durationMinutes?.rem(60)?.toString().orEmpty()) }
     var active by remember(initial) { mutableStateOf(initial?.active ?: true) }
     val context = LocalContext.current
+    val hoursFocus = remember { FocusRequester() }
+    val minutesFocus = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
     val hoursValue = hours.toIntOrNull() ?: 0
     val minutesValue = minutes.toIntOrNull() ?: 0
-    val suggestions = remember(existingEntries, note) { matchingNoteSuggestions(existingEntries, note) }
+    val suggestions = remember(existingEntries, note.text) { matchingNoteSuggestions(existingEntries, note.text) }
     val durationValid = hoursValue >= 0 && minutesValue in 0..59 && (hours.isBlank() || hours.toIntOrNull() != null) && (minutes.isBlank() || minutes.toIntOrNull() != null)
     fun chooseTime() {
         val calendar = Calendar.getInstance().apply { timeInMillis = timestamp }
@@ -771,6 +800,8 @@ private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>,
                     onValueChange = { note = it; suggestionsExpanded = true },
                     label = { Text("Note (optional)") },
                     minLines = 3,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { hoursFocus.requestFocus() }),
                     trailingIcon = if (suggestions.isNotEmpty()) {{ ExposedDropdownMenuDefaults.TrailingIcon(suggestionsExpanded) }} else null,
                     modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryEditable, true).fillMaxWidth()
                 )
@@ -778,15 +809,29 @@ private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>,
                     suggestions.forEach { suggestion ->
                         DropdownMenuItem(
                             text = { Text(suggestion, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            onClick = { note = suggestion; suggestionsExpanded = false }
+                            onClick = {
+                                note = TextFieldValue(suggestion, selection = TextRange(suggestion.length))
+                                suggestionsExpanded = false
+                            }
                         )
                     }
                 }
             }
             Text("Duration (optional)", style = MaterialTheme.typography.labelLarge)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(hours, { hours = it.filter(Char::isDigit) }, label = { Text("Hours") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
-                OutlinedTextField(minutes, { minutes = it.filter(Char::isDigit) }, label = { Text("Minutes") }, singleLine = true, isError = minutesValue !in 0..59, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f))
+                OutlinedTextField(
+                    hours, { hours = it.filter(Char::isDigit) }, label = { Text("Hours") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Next),
+                    keyboardActions = KeyboardActions(onNext = { minutesFocus.requestFocus() }),
+                    modifier = Modifier.weight(1f).focusRequester(hoursFocus)
+                )
+                OutlinedTextField(
+                    minutes, { minutes = it.filter(Char::isDigit) }, label = { Text("Minutes") }, singleLine = true,
+                    isError = minutesValue !in 0..59,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { keyboardController?.hide() }),
+                    modifier = Modifier.weight(1f).focusRequester(minutesFocus)
+                )
             }
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { active = !active }.padding(vertical = 2.dp),
@@ -797,8 +842,51 @@ private fun EntryDialog(initial: EventEntry?, existingEntries: List<EventEntry>,
             }
         } },
         dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
-        confirmButton = { Button(onClick = { val total = hoursValue * 60 + minutesValue; save(timestamp, note, total.takeIf { it > 0 }, active) }, enabled = durationValid) { Text("Save") } }
+        confirmButton = { Button(onClick = { val total = hoursValue * 60 + minutesValue; save(timestamp, note.text, total.takeIf { it > 0 }, active) }, enabled = durationValid) { Text("Save") } }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArchivedEventsScreen(viewModel: LogyViewModel, goBack: () -> Unit) {
+    val events by viewModel.events.collectAsStateWithLifecycle()
+    val archived = remember(events) { events.filter { it.archived }.sortedBy { it.name.lowercase() } }
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text("Archived events") },
+                navigationIcon = { IconButton(onClick = goBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back") } }
+            )
+        }
+    ) { padding ->
+        LazyColumn(
+            Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (archived.isEmpty()) item {
+                Column(Modifier.fillMaxWidth().padding(vertical = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Outlined.Archive, null, Modifier.size(42.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(12.dp))
+                    Text("No archived events", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text("Archived events can be restored here.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            items(archived, key = { it.id }) { event ->
+                Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+                    Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(event.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${event.category} • ${event.entryCount} ${if (event.entryCount == 1) "log" else "logs"}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { viewModel.setEventArchived(event.id, false) }) {
+                            Icon(Icons.Outlined.Unarchive, "Restore event", tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -966,7 +1054,7 @@ private fun SettingsScreen(
                 SettingsAction(Icons.Outlined.Upload, "Import CSV backup", "Supports Logy v1, v2, and v2.2 backups", import)
             }
             item { HorizontalDivider() }
-            item { Text("Logy 3.0", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text("Logy 3.1", fontWeight = FontWeight.SemiBold); Text("Private, local-first, and made for your moments.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 

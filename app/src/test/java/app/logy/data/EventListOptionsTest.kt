@@ -35,6 +35,26 @@ class EventListOptionsTest {
         )
     }
 
+    @Test
+    fun dateRangeKeepsEventsThatHaveNoLogs() {
+        val neverLogged = summary(5, "Never", "Personal", null)
+        assertEquals(true, includeEventForDateRange(neverLogged, hasDateRange = true, hasLogsInRange = false))
+        assertEquals(false, includeEventForDateRange(events.first().copy(entryCount = 1), hasDateRange = true, hasLogsInRange = false))
+    }
+
+    @Test
+    fun searchSortingUsesNewestMatchingLogInsteadOfUnrelatedEventLog() {
+        val adjusted = applySearchResultTimestamps(
+            events,
+            mapOf(
+                1L to listOf(EventEntry(id = 10, eventId = 1, occurredAt = 50, note = "match")),
+                2L to listOf(EventEntry(id = 11, eventId = 2, occurredAt = 250, note = "match"))
+            )
+        )
+
+        assertEquals(listOf(2L, 1L, 3L, 4L), applyEventListOptions(adjusted, null, EventSort.NEWEST_LOGGED).map { it.id })
+    }
+
     private fun summary(id: Long, name: String, category: String, lastEntry: Long?) = EventSummary(
         id = id,
         name = name,

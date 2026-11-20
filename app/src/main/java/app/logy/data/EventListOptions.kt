@@ -8,6 +8,19 @@ enum class EventSort(val label: String) {
     NAME("Name")
 }
 
+fun includeEventForDateRange(event: EventSummary, hasDateRange: Boolean, hasLogsInRange: Boolean): Boolean =
+    !hasDateRange || event.entryCount == 0 || hasLogsInRange
+
+fun applySearchResultTimestamps(
+    events: List<EventSummary>,
+    matchingLogs: Map<Long, List<EventEntry>>
+): List<EventSummary> = events.map { event ->
+    val newestMatch = matchingLogs[event.id].orEmpty().maxWithOrNull(
+        compareBy<EventEntry> { it.occurredAt }.thenBy { it.id }
+    )
+    event.copy(lastEntry = newestMatch?.occurredAt, lastNote = newestMatch?.note)
+}
+
 fun applyEventListOptions(
     events: List<EventSummary>,
     category: String?,

@@ -10,7 +10,7 @@ import app.logy.data.LogyDatabase
 class LogyApplication : Application() {
     val database by lazy {
         Room.databaseBuilder(this, LogyDatabase::class.java, "logy.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .addCallback(object : RoomDatabase.Callback() {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     db.execSQL("INSERT OR IGNORE INTO categories (`name`, `color`) VALUES ('General', 4287339766)")
@@ -31,6 +31,11 @@ class LogyApplication : Application() {
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE entries ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            }
+        }
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE events ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

@@ -40,6 +40,7 @@ class LogyViewModel(application: Application) : AndroidViewModel(application) {
     fun updateCategory(oldName: String, name: String, color: Long) = viewModelScope.launch { dao.renameCategory(oldName, EventCategory(name.trim(), color)) }
     fun deleteCategory(category: EventCategory) = viewModelScope.launch { if (category.name != "General") dao.removeCategory(category.name) }
     fun deleteEvent(event: TrackedEvent) = viewModelScope.launch { dao.deleteEvent(event) }
+    fun setEventArchived(id: Long, archived: Boolean) = viewModelScope.launch { dao.setEventArchived(id, archived) }
     fun deleteEntry(entry: EventEntry) = viewModelScope.launch { dao.deleteEntry(entry) }
 
     suspend fun exportCsv(): String = CsvBackup.export(dao.allCategories(), dao.allEvents(), dao.allEntries())

@@ -27,7 +27,8 @@ data class TrackedEvent(
     val name: String,
     val category: String = "General",
     val color: Long = 0xFF8B7CF6,
-    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis()
+    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
+    val archived: Boolean = false
 )
 
 @Entity(
@@ -56,7 +57,8 @@ data class EventSummary(
     @ColumnInfo(name = "created_at") val createdAt: Long,
     @ColumnInfo(name = "last_entry") val lastEntry: Long?,
     @ColumnInfo(name = "last_note") val lastNote: String?,
-    @ColumnInfo(name = "entry_count") val entryCount: Int
+    @ColumnInfo(name = "entry_count") val entryCount: Int,
+    val archived: Boolean = false
 )
 
 @Dao
@@ -83,6 +85,7 @@ interface LogyDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertCategory(category: EventCategory)
     @Update suspend fun updateEvent(event: TrackedEvent)
     @Update suspend fun updateEntry(entry: EventEntry)
+    @Query("UPDATE events SET archived = :archived WHERE id = :id") suspend fun setEventArchived(id: Long, archived: Boolean)
     @Delete suspend fun deleteEvent(event: TrackedEvent)
     @Delete suspend fun deleteEntry(entry: EventEntry)
     @Query("UPDATE events SET category = :newName WHERE category = :oldName") suspend fun updateEventsCategory(oldName: String, newName: String)
@@ -115,5 +118,5 @@ interface LogyDao {
     }
 }
 
-@Database(entities = [TrackedEvent::class, EventEntry::class, EventCategory::class], version = 3, exportSchema = false)
+@Database(entities = [TrackedEvent::class, EventEntry::class, EventCategory::class], version = 4, exportSchema = false)
 abstract class LogyDatabase : RoomDatabase() { abstract fun dao(): LogyDao }
